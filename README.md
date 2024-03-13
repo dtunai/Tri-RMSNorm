@@ -1,111 +1,107 @@
-# python-package-template
+# Tri-RMSNorm
 
-This is a template repository for Python package projects.
-
-## In this README :point_down:
-
-- [Features](#features)
-- [Usage](#usage)
-  - [Initial setup](#initial-setup)
-  - [Creating releases](#creating-releases)
-- [Projects using this template](#projects-using-this-template)
-- [FAQ](#faq)
-- [Contributing](#contributing)
+This small package provides an custom Triton kernel of RMS layer normalization with fused operations, leveraging the Triton compiler by OpenAI for high performance on GPUs. Implementation includes both forward and backward passes of RMS layer normalization, optimized for empowering deep learning training and inferencing.
 
 ## Features
 
-This template repository comes with all of the boilerplate needed for:
+**Customized FW/BW RMS Normalization:** 
 
-⚙️ Robust (and free) CI with [GitHub Actions](https://github.com/features/actions):
-  - Unit tests ran with [PyTest](https://docs.pytest.org) against multiple Python versions and operating systems.
-  - Type checking with [mypy](https://github.com/python/mypy).
-  - Linting with [ruff](https://astral.sh/ruff).
-  - Formatting with [isort](https://pycqa.github.io/isort/) and [black](https://black.readthedocs.io/en/stable/).
+Implements the forward and backward passes of RMS normalization with fused operations for better performance.
 
-🤖 [Dependabot](https://github.blog/2020-06-01-keep-all-your-packages-up-to-date-with-dependabot/) configuration to keep your dependencies up-to-date.
+**Triton and PyTorch Integration:** 
 
-📄 Great looking API documentation built using [Sphinx](https://www.sphinx-doc.org/en/master/) (run `make docs` to preview).
+Utilizes Triton for GPU-accelerated computations and parallel computation, seamlessly integrated with PyTorch tensors.
 
-🚀 Automatic GitHub and PyPI releases. Just follow the steps in [`RELEASE_PROCESS.md`](./RELEASE_PROCESS.md) to trigger a new release.
+**Customizable:**
+
+Compile-time constants for block sizes, accommodating different GPU architectures and memory layouts.
+
+**Atomic Operations for Gradient Accumulation:** 
+
+Atomic operations to safely accumulate gradients across threads, preventing race conditions and ensuring correct gradient computation during the backward pass.
+
+**Lock-Free Mechanisms:** 
+
+Advanced sync to minimize locking and blocking, improving the performance and scalability of gradient computation.
+
+## Getting Started
+
+## **Installation**
+
+**Requirements**
+
+```bash
+torch==2.1.0+cu121
+torchaudio==2.1.0+cu121
+torchvision==0.16.0+cu121
+triton==2.1.0
+```
+
+You can install the package using `pip3 install -e .`:
+
+```bash
+git clone https://github.com/simudt/Tri-RMSNorm
+cd Tri-RMSNorm
+pip3 install -e .
+```
 
 ## Usage
 
-### Initial setup
+The package provides two main functions:
 
-1. [Create a new repository](https://github.com/allenai/python-package-template/generate) from this template with the desired name of your project.
+- `_rms_norm_fwd_fused` for the forward pass of RMS normalization
 
-    *Your project name (i.e. the name of the repository) and the name of the corresponding Python package don't necessarily need to match, but you might want to check on [PyPI](https://pypi.org/) first to see if the package name you want is already taken.*
+- `_rms_norm_bwd_dx_fused` for the backward pass, computing gradients with respect to X, W, B
 
-2. Create a Python 3.8 or newer virtual environment.
+```python
+class RMSNormFunctionCustomKernel(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, weight, bias, eps):
+        M, N = x.shape
+        y = torch.empty_like(x)
+        rstd = torch.empty(M, dtype=torch.float32, device=x.device)
+        _rms_norm_fwd_fused[(M,)](x, y, weight, bias, rstd, x.stride(0), N, eps, BLOCK_SIZE=1024)
+        ctx.save_for_backward(x, weight, bias, rstd)
+        ctx.eps = eps
+        ctx.N = N
+        return y
 
-    *If you're not sure how to create a suitable Python environment, the easiest way is using [Miniconda](https://docs.conda.io/en/latest/miniconda.html). On a Mac, for example, you can install Miniconda using [Homebrew](https://brew.sh/):*
+    @staticmethod
+    def backward(ctx, dy):
+        x, weight, bias, rstd = ctx.saved_tensors
+        eps = ctx.eps
+        N = ctx.N
+        M = x.shape[0]
+        dx = torch.empty_like(x)
+        _dw = torch.empty_like(weight)
+        _db = torch.empty_like(bias)
+        locks = torch.zeros(2 * 32, dtype=torch.int32, device=x.device)
+        _rms_norm_bwd_dx_fused[(M,)](dx, dy, _dw, _db, x, weight, bias, rstd, locks, x.stride(0), N, eps, GROUP_SIZE_M=32, BLOCK_SIZE_N=1024)
+        return dx, _dw, _db, None
 
-    ```
-    brew install miniconda
-    ```
+def test_rms_norm_custom_kernel():
+    eps = 1e-5
+    input = torch.tensor([[0.1, -0.2] * 10] * 10, device='cuda', requires_grad=True)
+    weights = torch.tensor([0.1] * 20, device='cuda', requires_grad=True)
+    biases = torch.tensor([0.01] * 20, device='cuda', requires_grad=True)
 
-    *Then you can create and activate a new Python environment by running:*
+    output = RMSNormFunctionCustomKernel.apply(input, weights, biases, eps)
+    loss = output.mean()
+    loss.backward()
 
-    ```
-    conda create -n my-package python=3.9
-    conda activate my-package
-    ```
+    print("Gradients on Input: ", input.grad)
+    print("Gradients on Weights: ", weights.grad)
+    print("Gradients on Biases: ", biases.grad)
 
-3. Now that you have a suitable Python environment, you're ready to personalize this repository. Just run:
+test_rms_norm_custom_kernel()
+```
 
-    ```
-    pip install -r setup-requirements.txt
-    python scripts/personalize.py
-    ```
+Adjust grid, block, and other parameters as per your requirements and GPU specifications.
 
-    And then follow the prompts.
+## Benchmark
 
-    :pencil: *NOTE: This script will overwrite the README in your repository.*
+Tri-RMSNorm kernel demonstrates improved speedup in initial benchmarks when compared to the PyTorch-based custom RMSNorm implementation. Benchmarks will be included in the repository to ensure reproducibility.
 
-4. Commit and push your changes, then make sure all GitHub Actions jobs pass.
+## License
 
-5. (Optional) If you plan on publishing your package to PyPI, add repository secrets for `PYPI_USERNAME` and `PYPI_PASSWORD`. To add these, go to "Settings" > "Secrets" > "Actions", and then click "New repository secret".
-
-    *If you don't have PyPI account yet, you can [create one for free](https://pypi.org/account/register/).*
-
-6. (Optional) If you want to deploy your API docs to [readthedocs.org](https://readthedocs.org), go to the [readthedocs dashboard](https://readthedocs.org/dashboard/import/?) and import your new project.
-
-    Then click on the "Admin" button, navigate to "Automation Rules" in the sidebar, click "Add Rule", and then enter the following fields:
-
-    - **Description:** Publish new versions from tags
-    - **Match:** Custom Match
-    - **Custom match:** v[vV]
-    - **Version:** Tag
-    - **Action:** Activate version
-
-    Then hit "Save".
-
-    *After your first release, the docs will automatically be published to [your-project-name.readthedocs.io](https://your-project-name.readthedocs.io/).*
-
-### Creating releases
-
-Creating new GitHub and PyPI releases is easy. The GitHub Actions workflow that comes with this repository will handle all of that for you.
-All you need to do is follow the instructions in [RELEASE_PROCESS.md](./RELEASE_PROCESS.md).
-
-## Projects using this template
-
-Here is an incomplete list of some projects that started off with this template:
-
-- [ai2-tango](https://github.com/allenai/tango)
-- [cached-path](https://github.com/allenai/cached_path)
-- [beaker-py](https://github.com/allenai/beaker-py)
-- [gantry](https://github.com/allenai/beaker-gantry)
-- [ip-bot](https://github.com/abe-101/ip-bot)
-
-☝️ *Want your work featured here? Just open a pull request that adds the link.*
-
-## FAQ
-
-#### Should I use this template even if I don't want to publish my package?
-
-Absolutely! If you don't want to publish your package, just delete the `docs/` directory and the `release` job in [`.github/workflows/main.yml`](https://github.com/allenai/python-package-template/blob/main/.github/workflows/main.yml).
-
-## Contributing
-
-If you find a bug :bug:, please open a [bug report](https://github.com/allenai/python-package-template/issues/new?assignees=&labels=bug&template=bug_report.md&title=).
-If you have an idea for an improvement or new feature :rocket:, please open a [feature request](https://github.com/allenai/python-package-template/issues/new?assignees=&labels=Feature+request&template=feature_request.md&title=).
+This package is licensed under the Apache License - see the LICENSE file for details.
