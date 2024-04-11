@@ -38,7 +38,7 @@ triton==2.1.0
 You can install the package using `pip3 install -e .`:
 
 ```bash
-git clone https://github.com/simudt/Tri-RMSNorm
+git clone https://github.com/attophyd/Tri-RMSNorm
 cd Tri-RMSNorm
 pip3 install -e .
 ```
